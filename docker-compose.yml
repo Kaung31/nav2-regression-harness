@@ -1,0 +1,20 @@
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: nav2-harness:dev
+    container_name: nav2-harness
+    volumes:
+      - .:/ws
+      - build-cache:/ws/build
+      - install-cache:/ws/install
+    ports:
+      - "8765:8765"
+    stdin_open: true
+    tty: true
+    shm_size: 2gb
+
+volumes:
+  build-cache:
+  install-cache:

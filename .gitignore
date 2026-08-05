@@ -1,0 +1,7 @@
+build/
+install/
+log/
+results/
+__pycache__/
+*.mcap
+.venv/
