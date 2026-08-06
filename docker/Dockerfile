@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y \
 RUN apt-get update && apt-get install -y \
       ros-jazzy-ros-gz \
       ros-jazzy-demo-nodes-cpp \
+      ros-jazzy-teleop-twist-keyboard \
       ros-jazzy-navigation2 \
       ros-jazzy-nav2-bringup \
       ros-jazzy-slam-toolbox \
@@ -41,7 +42,7 @@ ENV GALLIUM_DRIVER=llvmpipe
 ENV EGL_PLATFORM=surfaceless
 ENV XDG_RUNTIME_DIR=/tmp/runtime
 RUN mkdir -p /tmp/runtime && chmod 700 /tmp/runtime
-ENV ROS_LOCALHOST_ONLY=1
+ENV ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
 
 RUN echo "source /opt/ros/jazzy/setup.bash" >> /root/.bashrc \
  && echo "[ -f /ws/install/setup.bash ] && source /ws/install/setup.bash" >> /root/.bashrc
