@@ -24,6 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'send_goal = harness_runner.send_goal:main',
+            'gen_map = harness_runner.gen_map:main',
         ],
     },
 )

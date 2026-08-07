@@ -27,4 +27,8 @@ install(DIRECTORY urdf worlds launch config
   DESTINATION share/${PROJECT_NAME}
 )
 
+install(DIRECTORY urdf worlds launch config maps
+  DESTINATION share/${PROJECT_NAME}
+)
+
 ament_package()

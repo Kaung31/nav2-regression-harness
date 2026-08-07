@@ -41,8 +41,11 @@ ENV LIBGL_ALWAYS_SOFTWARE=1
 ENV GALLIUM_DRIVER=llvmpipe
 ENV EGL_PLATFORM=surfaceless
 ENV XDG_RUNTIME_DIR=/tmp/runtime
-RUN mkdir -p /tmp/runtime && chmod 700 /tmp/runtime
 ENV ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+ENV FASTDDS_BUILTIN_TRANSPORTS=UDPv4
+
+RUN mkdir -p /tmp/runtime && chmod 700 /tmp/runtime
 
 RUN echo "source /opt/ros/jazzy/setup.bash" >> /root/.bashrc \
  && echo "[ -f /ws/install/setup.bash ] && source /ws/install/setup.bash" >> /root/.bashrc
