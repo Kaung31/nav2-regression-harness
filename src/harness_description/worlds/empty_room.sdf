@@ -1,6 +1,12 @@
 <?xml version="1.0"?>
 <sdf version="1.10">
   <world name="empty_room">
+  
+    <physics name="default_physics" type="ignored">
+      <max_step_size>0.005</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+      <real_time_update_rate>200</real_time_update_rate>
+    </physics>
 
     <plugin filename="gz-sim-physics-system"
             name="gz::sim::systems::Physics"/>

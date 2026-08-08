@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y \
       ros-jazzy-xacro \
       ros-jazzy-foxglove-bridge \
       ros-jazzy-rosbag2-storage-mcap \
+      ros-jazzy-rmw-cyclonedds-cpp \
       ros-jazzy-tf2-tools \
       ros-jazzy-launch-testing \
       ros-jazzy-launch-testing-ros \

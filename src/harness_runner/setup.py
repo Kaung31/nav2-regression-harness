@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'send_goal = harness_runner.send_goal:main',
             'gen_map = harness_runner.gen_map:main',
+            'run_scenario = harness_runner.run_scenario:main',
         ],
     },
 )

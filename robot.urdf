@@ -148,12 +148,12 @@
     <sensor name="lidar" type="gpu_lidar">
       <topic>scan</topic>
       <gz_frame_id>lidar_link</gz_frame_id>
-      <update_rate>5</update_rate>
+      <update_rate>2</update_rate>
       <always_on>true</always_on>
       <lidar>
         <scan>
           <horizontal>
-            <samples>180</samples>
+            <samples>90</samples>
             <resolution>1</resolution>
             <min_angle>-3.14159</min_angle>
             <max_angle>3.14159</max_angle>
