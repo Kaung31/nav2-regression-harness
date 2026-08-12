@@ -148,7 +148,7 @@
     <sensor name="lidar" type="gpu_lidar">
       <topic>scan</topic>
       <gz_frame_id>lidar_link</gz_frame_id>
-      <update_rate>2</update_rate>
+      <update_rate>1</update_rate>
       <always_on>true</always_on>
       <lidar>
         <scan>
@@ -168,6 +168,14 @@
     </sensor>
   </gazebo>
   <gazebo>
+    <plugin filename="gz-sim-odometry-publisher-system"
+            name="gz::sim::systems::OdometryPublisher">
+      <odom_frame>map</odom_frame>
+      <robot_base_frame>base_footprint</robot_base_frame>
+      <odom_topic>ground_truth</odom_topic>
+      <odom_publish_frequency>10</odom_publish_frequency>
+      <dimensions>2</dimensions>
+    </plugin>
     <plugin filename="gz-sim-diff-drive-system" name="gz::sim::systems::DiffDrive">
       <left_joint>left_wheel_joint</left_joint>
       <right_joint>right_wheel_joint</right_joint>

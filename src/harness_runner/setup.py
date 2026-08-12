@@ -27,6 +27,8 @@ setup(
             'send_goal = harness_runner.send_goal:main',
             'gen_map = harness_runner.gen_map:main',
             'run_scenario = harness_runner.run_scenario:main',
+            'preview = harness_runner.preview:main',
+            'gen_scenarios = harness_runner.gen_scenarios:main',
         ],
     },
 )

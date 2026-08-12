@@ -69,7 +69,7 @@ controller_server:
     FollowPath:
       plugin: "dwb_core::DWBLocalPlanner"
       debug_trajectory_details: false
-      min_vel_x: 0.0
+      min_vel_x: 0.05
       min_vel_y: 0.0
       max_vel_x: 0.4
       max_vel_y: 0.0
@@ -91,7 +91,7 @@ controller_server:
       angular_granularity: 0.025
       transform_tolerance: 3.0
       xy_goal_tolerance: 0.25
-      trans_stopped_velocity: 0.25
+      trans_stopped_velocity: 0.05
       short_circuit_trajectory_evaluation: true
       critics: ["RotateToGoal", "Oscillation", "BaseObstacle",
                 "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
@@ -114,7 +114,7 @@ local_costmap:
       publish_frequency: 1.0
       global_frame: odom
       robot_base_frame: base_footprint
-      transform_tolerance: 3.0
+      transform_tolerance: 5.0
       rolling_window: true
       width: 4
       height: 4

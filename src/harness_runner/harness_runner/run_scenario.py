@@ -47,6 +47,9 @@ class ScenarioRun(Node):
         self.path_length = 0.0
         self.prev_xy = None
         self.min_lidar_range = float("inf")
+        self.true_path_length = 0.0
+        self.true_prev_xy = None
+        self.true_final_xy = None
         self.max_speed = 0.0
         self.recoveries = 0
         self.odom_samples = 0
@@ -67,6 +70,7 @@ class ScenarioRun(Node):
         self.create_subscription(Twist, "/cmd_vel", self._cmd_cb, 10)
         self.create_subscription(BehaviorTreeLog, "/behavior_tree_log",
                                  self._bt_cb, 10)
+        self.create_subscription(Odometry, "/ground_truth", self._truth_cb, 10)
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -102,6 +106,16 @@ class ScenarioRun(Node):
                     ev.current_status == "RUNNING" and \
                     ev.previous_status != "RUNNING":
                 self.recoveries += 1
+
+    def _truth_cb(self, msg):
+        x = msg.pose.pose.position.x
+        y = msg.pose.pose.position.y
+        self.true_final_xy = (x, y)
+        if self.true_prev_xy is not None:
+            step = math.hypot(x - self.true_prev_xy[0], y - self.true_prev_xy[1])
+            if step < 1.0:
+                self.true_path_length += step
+        self.true_prev_xy = (x, y)
 
     def wait_for_active(self, timeout):
         """bt_navigator must be ACTIVE, not merely present."""
@@ -161,6 +175,13 @@ class ScenarioRun(Node):
                 for _ in range(25):
                     rclpy.spin_once(self, timeout_sec=0.2)
                 outcome = "TIMEOUT"
+                break
+            if (self.path_length > 1.0 and
+                    self.true_path_length < 0.2 * self.path_length):
+                handle.cancel_goal_async()
+                for _ in range(25):
+                    rclpy.spin_once(self, timeout_sec=0.2)
+                outcome = "STUCK"
                 break
 
         wall = time.time() - start
@@ -245,6 +266,8 @@ def run_scenario(cfg):
         "min_lidar_range": None, "min_clearance": None,
         "max_speed": None, "recoveries": None, "final_error": None,
         "odom_samples": 0, "scan_samples": 0, "wall_time": None,
+        "path_length": None, "straight_line": None, "path_efficiency": None,
+        "true_path_length": None, "true_final_error": None, "slip_ratio": None,
     }
     wall_start = time.time()
     domain = cfg.get("domain_id", 42)
@@ -288,10 +311,19 @@ def run_scenario(cfg):
                 "straight_line": round(straight, 3),
                 "path_efficiency": (round(actual_straight / node.path_length, 3)
                                     if node.path_length > 0.01 else None),
+                "optimal_path": cfg.get("optimal_path"),
+                "planning_efficiency": (
+                    round(cfg["optimal_path"] / node.path_length, 3)
+                    if (outcome == "SUCCESS" and cfg.get("optimal_path")
+                        and node.path_length > 0.01)
+                    else None),
                 "min_lidar_range": round(mlr, 3) if mlr is not None else None,
                 "min_clearance": (round(mlr - ROBOT_RADIUS, 3)
                                   if mlr is not None else None),
                 "max_speed": round(node.max_speed, 3),
+                "true_path_length": round(node.true_path_length, 3),
+                "slip_ratio": (round(node.true_path_length / node.path_length, 3)
+                               if node.path_length > 0.01 else None),
                 "recoveries": node.recoveries,
                 "odom_samples": node.odom_samples,
                 "scan_samples": node.scan_samples,
@@ -300,6 +332,10 @@ def run_scenario(cfg):
                 result["final_error"] = round(
                     math.hypot(cfg["goal_x"] - node.final_xy[0],
                                cfg["goal_y"] - node.final_xy[1]), 3)
+            if node.true_final_xy:
+                result["true_final_error"] = round(
+                    math.hypot(cfg["goal_x"] - node.true_final_xy[0],
+                               cfg["goal_y"] - node.true_final_xy[1]), 3)
     except Exception as exc:
         result["outcome"] = f"HARNESS_ERROR:{type(exc).__name__}"
         result["error_detail"] = str(exc)[:200]
@@ -326,6 +362,7 @@ def main():
     p.add_argument("--domain-id", type=int, default=42)
     p.add_argument("--goal-timeout", type=float, default=180.0)
     p.add_argument("--startup-timeout", type=float, default=180.0)
+    p.add_argument("--optimal-path", type=float, default=None)
     p.add_argument("--out", default=None)
     a = p.parse_args()
 
@@ -334,6 +371,7 @@ def main():
            "goal_x": a.x, "goal_y": a.y, "goal_yaw": a.yaw,
            "domain_id": a.domain_id, "goal_timeout": a.goal_timeout,
            "startup_timeout": a.startup_timeout,
+           "optimal_path": a.optimal_path,
            "log_path": f"/tmp/{sid}.log"}
     res = run_scenario(cfg)
     print(json.dumps(res, indent=2))
