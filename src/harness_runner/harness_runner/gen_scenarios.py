@@ -44,6 +44,12 @@ def main():
             "optimal_path": L.optimal_path,
             "straight_line": straight,
             "detour_ratio": round(L.optimal_path / straight, 3),
+            # Insurance, not a feature. A true collision check needs the
+            # geometry against the ground-truth pose -- the lidar cannot give
+            # it, because it saturates at range_min. Emitting the boxes now
+            # costs three lines; discovering they are needed after a 300-run
+            # batch means regenerating the worlds and re-running the batch.
+            "boxes": [[b.cx, b.cy, b.sx, b.sy, b.sz] for b in L.boxes],
         })
 
     idx_path = os.path.join(a.out, "index.json")

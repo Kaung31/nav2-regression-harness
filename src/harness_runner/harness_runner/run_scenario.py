@@ -29,6 +29,20 @@ from lifecycle_msgs.srv import GetState
 
 ROBOT_RADIUS = 0.22
 
+# The lidar is NOT at the robot's centre. robot.urdf.xacro mounts lidar_link at
+# xyz="0.10 0 0.075" on base_link, so a raw range is measured from a point 10 cm
+# ahead of the footprint centre. `min_lidar_range - ROBOT_RADIUS` therefore
+# carries a bearing-dependent error of up to LIDAR_X: forward beams read ~0.1 m
+# too close, rear beams ~0.1 m too generous. Keep this in step with the URDF.
+LIDAR_X = 0.10
+
+# A hit closer than the sensor's range_min is not reported as "very close", it
+# is dropped or clamped. Any clearance derived from such a scan is a LOWER
+# BOUND, not a measurement, so the run records that it happened rather than
+# quietly reporting the floor as if it were data. 0.01 is <resolution> in the
+# URDF's <range> block.
+RANGE_SATURATION_EPS = 0.01
+
 
 def yaw_to_quat(yaw):
     return (0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0))
@@ -47,6 +61,8 @@ class ScenarioRun(Node):
         self.path_length = 0.0
         self.prev_xy = None
         self.min_lidar_range = float("inf")
+        self.min_centre_range = float("inf")
+        self.clearance_saturated = False
         self.true_path_length = 0.0
         self.true_prev_xy = None
         self.true_final_xy = None
@@ -92,10 +108,25 @@ class ScenarioRun(Node):
 
     def _scan_cb(self, msg):
         self.scan_samples += 1
-        valid = [r for r in msg.ranges
-                 if msg.range_min < r < msg.range_max and math.isfinite(r)]
-        if valid:
-            self.min_lidar_range = min(self.min_lidar_range, min(valid))
+        for i, r in enumerate(msg.ranges):
+            if not math.isfinite(r):
+                continue
+            # Check saturation BEFORE the validity filter: a reading clamped to
+            # exactly range_min is the case that matters most and the filter
+            # below would silently discard it.
+            if r <= msg.range_min + RANGE_SATURATION_EPS:
+                self.clearance_saturated = True
+            if not (msg.range_min < r < msg.range_max):
+                continue
+            if r < self.min_lidar_range:
+                self.min_lidar_range = r
+            # Re-reference the hit to base_link before comparing it against a
+            # base_link-centred radius. Mixing the two frames is what made the
+            # old min_clearance wrong by up to LIDAR_X.
+            a = msg.angle_min + i * msg.angle_increment
+            d = math.hypot(LIDAR_X + r * math.cos(a), r * math.sin(a))
+            if d < self.min_centre_range:
+                self.min_centre_range = d
 
     def _cmd_cb(self, msg):
         self.max_speed = max(self.max_speed, abs(msg.linear.x))
@@ -264,9 +295,9 @@ def run_scenario(cfg):
         "sim_duration": None, "wall_duration": None,
         "path_length": None, "straight_line": None, "path_efficiency": None,
         "min_lidar_range": None, "min_clearance": None,
+        "clearance_saturated": False,
         "max_speed": None, "recoveries": None, "final_error": None,
         "odom_samples": 0, "scan_samples": 0, "wall_time": None,
-        "path_length": None, "straight_line": None, "path_efficiency": None,
         "true_path_length": None, "true_final_error": None, "slip_ratio": None,
     }
     wall_start = time.time()
@@ -303,6 +334,8 @@ def run_scenario(cfg):
                                          end_xy[1] - start_xy[1])
             mlr = (node.min_lidar_range
                    if math.isfinite(node.min_lidar_range) else None)
+            mcr = (node.min_centre_range
+                   if math.isfinite(node.min_centre_range) else None)
             result.update({
                 "outcome": outcome,
                 "sim_duration": round(sim_dur, 2) if sim_dur is not None else None,
@@ -318,8 +351,13 @@ def run_scenario(cfg):
                         and node.path_length > 0.01)
                     else None),
                 "min_lidar_range": round(mlr, 3) if mlr is not None else None,
-                "min_clearance": (round(mlr - ROBOT_RADIUS, 3)
-                                  if mlr is not None else None),
+                "min_clearance": (round(mcr - ROBOT_RADIUS, 3)
+                                  if mcr is not None else None),
+                # True = the lidar hit its floor, so min_clearance is an upper
+                # bound on how bad it got, not a measurement. A negative
+                # min_clearance with this set is NOT evidence of a specific
+                # overlap depth.
+                "clearance_saturated": node.clearance_saturated,
                 "max_speed": round(node.max_speed, 3),
                 "true_path_length": round(node.true_path_length, 3),
                 "slip_ratio": (round(node.true_path_length / node.path_length, 3)

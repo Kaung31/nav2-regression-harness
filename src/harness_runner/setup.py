@@ -29,6 +29,7 @@ setup(
             'run_scenario = harness_runner.run_scenario:main',
             'preview = harness_runner.preview:main',
             'gen_scenarios = harness_runner.gen_scenarios:main',
+            'batch_run = harness_runner.batch_run:main',
         ],
     },
 )
