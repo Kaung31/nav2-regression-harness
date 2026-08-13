@@ -294,6 +294,14 @@ STUCK_RECOVERY_COUNT = 3
 def classify_failure(outcome, row, log_path):
     """-> (failure_class, evidence). TIMEOUT is a symptom, not a mode.
 
+    Strings verified against Jazzy logs, not assumed. "Failed to make
+    progress" -- which CLAUDE.md's debugging section recommended -- does not
+    appear in this stack at all (0 occurrences across three runs); do not
+    reintroduce it. The strings that actually discriminate are "failed to
+    create" (18 / 0 / 0 across FAILED / SUCCESS / SUCCESS) and, more weakly,
+    "aborting handle" (20 / 4 / 0 -- present in a SUCCESS run, so never a
+    sole signal).
+
     Deliberately does NOT emit `collision` from min_clearance: that metric is
     derived from the robot's own lidar, which saturates at range_min, so a
     negative value is a lower bound and not proof of contact. The one
@@ -314,29 +322,40 @@ def classify_failure(outcome, row, log_path):
     except OSError:
         return "unclassified", f"launch log unreadable: {log_path}"
 
+    low = log.lower()
     plans = log.count("Passing new path")
-    no_progress = log.count("Failed to make progress")
+    plan_fails = low.count("failed to create")     # NavFn could not plan
+    aborts = low.count("aborting handle")          # planner action aborted
     recoveries = row.get("recoveries") or 0
     travelled = row.get("true_path_length")
     optimal = row.get("optimal_path")
+    evidence = (f"{plans} paths, {plan_fails} plan failures, {aborts} aborts, "
+                f"{recoveries} recoveries, moved {travelled} m of {optimal} m")
 
-    if plans == 0:
-        return "no_plan", "no 'Passing new path' in launch log"
+    # Ordered most-fundamental first. Every rule below is downstream of the
+    # ones above it, so a run that trips several gets named by its cause
+    # rather than by its loudest symptom.
     if outcome == "STUCK":
-        return "collision", (f"ground truth {travelled} m vs wheel odom "
-                             f"{row.get('path_length')} m")
-    if no_progress or recoveries >= STUCK_RECOVERY_COUNT:
-        return "stuck_recovering", (f"{no_progress}x 'Failed to make "
-                                    f"progress', {recoveries} recoveries")
+        # Ground-truth derived (rule 1): wheels turning, true pose static.
+        return "collision", evidence
+    if plan_fails or plans == 0:
+        # NOT `plans == 0` alone. s00000 published 33 paths AND failed to
+        # plan 18 times; testing only for the absence of paths called that a
+        # controller problem, when the planner was the thing falling over.
+        # Recoveries in that run are a CONSEQUENCE of planning failure --
+        # classifying on them reproduces the "TIMEOUT is a symptom" mistake
+        # one level down. Verified discriminator: 18 plan failures in the one
+        # FAILED run, 0 in both SUCCESS runs.
+        return "no_plan", evidence
+    if recoveries >= STUCK_RECOVERY_COUNT:
+        return "stuck_recovering", evidence
     if travelled is not None and optimal:
         if travelled < EXECUTED_FRACTION * optimal:
-            return "plan_not_executed", (f"{plans} paths published, moved "
-                                         f"{travelled} m of {optimal} m")
+            return "plan_not_executed", evidence
     # Reaching here is a signal, not a bug: the run failed in a way rule 11
     # does not yet name. If a batch produces many, add a class -- do not widen
     # an existing one to absorb them.
-    return "unclassified", (f"{plans} paths, {recoveries} recoveries, "
-                            f"moved {travelled} m of {optimal} m")
+    return "unclassified", evidence
 
 
 # --------------------------------------------------------------------------
