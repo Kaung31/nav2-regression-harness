@@ -1,0 +1,143 @@
+# Phase 6.5/7: the canonical doorway sweep, sharded.
+#
+# Scenarios are GENERATED here rather than committed. Generation is
+# deterministic from the width, so every shard produces byte-identical worlds,
+# and CI can never run a stale copy of the geometry against a newer generator.
+#
+# Default is the PILOT: 21 widths x 3 repeats = 63 runs, enough to locate the
+# transition band and nothing more. Sampling rule 1 says concentrate repeats
+# where the variance is -- which you cannot do until you know where that is.
+# Raise --repeats once the pilot has told you.
+name: doorway sweep
+
+on:
+  workflow_dispatch:
+    inputs:
+      repeats:
+        description: "runs per gap width (3 = pilot, 46 = powered sweep)"
+        default: "3"
+      shards:
+        description: "parallel workers"
+        default: "8"
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        run: |
+          N=${{ github.event.inputs.shards }}
+          echo "matrix=$(seq 1 $N | jq -Rsc 'split("\n")[:-1]')" >> $GITHUB_OUTPUT
+
+  sweep:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          tags: nav2-harness:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Shard ${{ matrix.shard }}/${{ github.event.inputs.shards }}
+        run: |
+          docker run --rm --shm-size=2g -v ${{ github.workspace }}:/ws nav2-harness:ci \
+            bash -c 'set -e
+              git config --global --add safe.directory /ws
+              source /opt/ros/jazzy/setup.bash
+              colcon build
+              source /ws/install/setup.bash
+              python3 /ws/src/harness_runner/test/test_doorway.py
+              ros2 run harness_runner gen_scenarios --mode doorway --out /ws/scenarios
+              ros2 run harness_runner batch_run \
+                --index /ws/scenarios/doorway_index.json \
+                --repeats ${{ github.event.inputs.repeats }} \
+                --shard ${{ matrix.shard }}/${{ github.event.inputs.shards }} \
+                --goal-timeout 240 \
+                --out /ws/results/doorway_${{ matrix.shard }}.csv \
+                --log-dir /ws/results/logs/dw_${{ matrix.shard }}'
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: doorway-shard-${{ matrix.shard }}
+          path: results/doorway_${{ matrix.shard }}.csv
+          if-no-files-found: error
+
+  merge:
+    needs: sweep
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: doorway-shard-*
+          path: shards
+          merge-multiple: true
+
+      - name: Merge and report success rate by gap width
+        run: |
+          python3 src/harness_runner/harness_runner/merge_shards.py \
+            'shards/*.csv' --out results/doorway.csv
+          python3 - <<'EOF'
+          import csv, collections, math
+          rows = list(csv.DictReader(open('results/doorway.csv')))
+          by = collections.defaultdict(list)
+          for r in rows:
+              by[float(r['gap_width_continuous'])].append(r)
+
+          def wilson(k, n):
+              if not n: return (0.0, 0.0)
+              p, z = k/n, 1.96
+              den = 1 + z*z/n
+              c = (p + z*z/(2*n))/den
+              h = z/den*math.sqrt(p*(1-p)/n + z*z/(4*n*n))
+              return max(0.0, c-h), min(1.0, c+h)
+
+          print(f"{'gap':>5} {'n':>3} {'pass':>5} {'rate':>6}  {'95% CI':>14}  failure classes")
+          print("-"*78)
+          band = []
+          for w in sorted(by):
+              g = by[w]; n = len(g)
+              ok = sum(1 for r in g if r['outcome'] == 'SUCCESS')
+              lo, hi = wilson(ok, n)
+              cls = collections.Counter(r['failure_class'] for r in g if r['failure_class'])
+              rate = ok/n
+              if 0 < rate < 1: band.append(w)
+              bar = '#'*int(rate*20)
+              print(f"{w:5.2f} {n:3d} {ok:5d} {rate:6.0%}  [{lo:5.1%},{hi:5.1%}]  {bar:<20} "
+                    f"{dict(cls) if cls else ''}")
+          print()
+          if band:
+              print(f"TRANSITION BAND: {min(band):.2f} - {max(band):.2f} m "
+                    f"({len(band)} widths neither 0% nor 100%)")
+              print("Concentrate repeats here for the powered sweep; ~5 per width outside it.")
+          else:
+              print("No mixed-outcome widths: either the step is too coarse, or the "
+                    "transition sits outside 0.50-1.50 m. Widen or refine before "
+                    "spending runs on a powered sweep.")
+          print(f"\n2 x inflation_radius = {2*float(rows[0]['inflation_radius']):.2f} m "
+                f"-- the number Phase 7a exists to confirm or refute")
+          rtf = [float(r['realtime_factor']) for r in rows if r['realtime_factor']]
+          if rtf: print(f"rtf {min(rtf):.3f}-{max(rtf):.3f}   excluded below 0.7: "
+                        f"{sum(1 for x in rtf if x < 0.7)}")
+          print("leaked_procs:", {r['leaked_procs'] for r in rows})
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: doorway-merged
+          path: results/doorway.csv
