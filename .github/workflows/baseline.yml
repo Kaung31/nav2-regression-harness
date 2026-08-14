@@ -1,0 +1,101 @@
+# Phase 6, stage 2: reproduce the measured empty-room baseline on CI, in
+# parallel, and see whether GitHub runners behave like the Mac.
+#
+# Mac reference (results/baseline.csv, n=20): 15% failure rate [5.2%, 36.0%],
+# bimodal -- 14 clean runs at 10.3-11.1 s, 6 degraded at 16.6-34.1 s.
+#
+# Same n=20 here so the comparison is like for like, but split four ways so it
+# finishes in ~6 minutes instead of ~20. That also exercises --shard and the
+# merge on a scenario whose answer is already known, which is the whole reason
+# to do it before the real sweep: if the numbers disagree we learn it now, on
+# a run that costs six minutes.
+name: CI baseline (stage 2)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  shard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false          # one bad shard must not hide the other three
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          tags: nav2-harness:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run shard ${{ matrix.shard }} of 4
+        run: |
+          docker run --rm --shm-size=2g -v ${{ github.workspace }}:/ws nav2-harness:ci \
+            bash -c 'set -e
+              source /opt/ros/jazzy/setup.bash
+              colcon build
+              source /ws/install/setup.bash
+              ros2 run harness_runner batch_run \
+                --index /ws/scenarios/control_index.json \
+                --repeats 20 --shard ${{ matrix.shard }}/4 \
+                --out /ws/results/ci_baseline_${{ matrix.shard }}.csv \
+                --log-dir /ws/results/logs/ci_${{ matrix.shard }}'
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shard-${{ matrix.shard }}
+          path: results/ci_baseline_${{ matrix.shard }}.csv
+          if-no-files-found: error
+
+  merge:
+    needs: shard
+    if: always()                # still merge if one shard failed; partial data
+    runs-on: ubuntu-24.04       # is data, and the merge reports what it got
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: shard-*
+          path: shards
+          merge-multiple: true
+
+      - name: Merge and compare against the Mac baseline
+        run: |
+          python3 src/harness_runner/harness_runner/merge_shards.py \
+            'shards/*.csv' --out results/ci_baseline.csv
+          python3 - <<'EOF'
+          import csv, math
+          rows = list(csv.DictReader(open('results/ci_baseline.csv')))
+          n = len(rows); fails = [r for r in rows if r['outcome'] != 'SUCCESS']
+          p = len(fails)/n; z = 1.96; den = 1 + z*z/n
+          c = (p + z*z/(2*n))/den
+          h = z/den*math.sqrt(p*(1-p)/n + z*z/(4*n*n))
+          clean = [float(r['sim_duration']) for r in rows
+                   if r['recoveries'] == '0' and r['sim_duration']]
+          deg   = [float(r['sim_duration']) for r in rows
+                   if r['recoveries'] != '0' and r['sim_duration']]
+          rtf   = [float(r['realtime_factor']) for r in rows if r['realtime_factor']]
+          print(f"CI  : {len(fails)}/{n} failed = {p:.0%}  95% CI [{max(0,c-h):.1%}, {c+h:.1%}]")
+          print(f"Mac : 3/20 failed = 15%       95% CI [5.2%, 36.0%]")
+          if clean: print(f"CI  clean n={len(clean):2} {min(clean):.1f}-{max(clean):.1f}   Mac clean n=14 10.3-11.1")
+          if deg:   print(f"CI  degr. n={len(deg):2} {min(deg):.1f}-{max(deg):.1f}   Mac degr. n= 6 16.6-34.1")
+          if rtf:   print(f"CI  rtf {min(rtf):.3f}-{max(rtf):.3f}          Mac rtf ~1.000")
+          cls = {}
+          for r in fails: cls[r['failure_class']] = cls.get(r['failure_class'],0)+1
+          print("CI  failure classes:", cls or 'none')
+          print("Mac failure classes: {'goal_tolerance_miss': 2, 'plan_not_executed': 1}")
+          leaks = {r['leaked_procs'] for r in rows}
+          print("leaked_procs values:", leaks, "(want {'0'})")
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-baseline-merged
+          path: results/ci_baseline.csv

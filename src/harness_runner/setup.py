@@ -30,6 +30,7 @@ setup(
             'preview = harness_runner.preview:main',
             'gen_scenarios = harness_runner.gen_scenarios:main',
             'batch_run = harness_runner.batch_run:main',
+            'merge_shards = harness_runner.merge_shards:main',
         ],
     },
 )
