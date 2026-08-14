@@ -775,6 +775,11 @@ def main():
                         "are never retried at any setting.")
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--start-seed", type=int, default=None)
+    p.add_argument("--shard", default=None, metavar="i/n",
+                   help="run only worker i of n. Slices round-robin, not in "
+                        "contiguous blocks, so scenario difficulty spreads "
+                        "evenly -- contiguous chunks would give one worker "
+                        "every hard scenario and skew wall-clock badly.")
     p.add_argument("--dry-run", action="store_true")
     a = p.parse_args()
 
@@ -822,6 +827,16 @@ def main():
     # first few scenarios and nothing for the rest.
     tasks = [(s, r) for r in range(a.repeats) for s in scenarios
              if (s["scenario_id"], str(r)) not in done]
+    if a.shard:
+        try:
+            si, sn = (int(x) for x in a.shard.split("/"))
+            if not 1 <= si <= sn:
+                raise ValueError
+        except ValueError:
+            print(f"--shard must be i/n with 1 <= i <= n, got {a.shard!r}",
+                  file=sys.stderr)
+            sys.exit(EXIT_CONFIG)
+        tasks = tasks[si - 1::sn]
     if a.limit:
         tasks = tasks[:a.limit]
 

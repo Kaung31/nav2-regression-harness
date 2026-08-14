@@ -1,0 +1,91 @@
+# Phase 6, stage 1: does the stack run on a GitHub runner at all, and at what
+# real-time factor?
+#
+# Nothing is sharded, nothing is merged, no results are published. The entire
+# question is whether a 4-core runner with software rendering can drive Gazebo
+# and Nav2 at an RTF the analysis will accept -- CLAUDE.md's validity table
+# already flags that the params are tuned to one Mac's throughput. If RTF
+# collapses here, a sharded pipeline built on top would just produce 300 rows
+# that Phase 9's 0.7 exclusion throws away.
+#
+# Manual only. Nothing this slow belongs on `push`.
+name: CI probe (stage 1)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Cached to GitHub's own layer store: the image is three large apt
+      # layers, and rebuilding it per job is what makes the existing
+      # regression.yml matrix waste ~30 minutes a run.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          tags: nav2-harness:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # --shm-size matches docker-compose.yml. Docker's 64 MB default is not
+      # enough for Gazebo plus DDS and fails in ways that look like flaky
+      # transport rather than an out-of-memory condition.
+      - name: Build workspace and run unit checks
+        run: |
+          docker run --rm --shm-size=2g -v ${{ github.workspace }}:/ws nav2-harness:ci \
+            bash -c 'set -e
+              source /opt/ros/jazzy/setup.bash
+              colcon build
+              source /ws/install/setup.bash
+              python3 /ws/src/harness_runner/test/test_phase5.py
+              echo "RMW_IMPLEMENTATION=$RMW_IMPLEMENTATION"
+              nproc; free -m'
+
+      - name: One control scenario
+        run: |
+          docker run --rm --shm-size=2g -v ${{ github.workspace }}:/ws nav2-harness:ci \
+            bash -c 'set -e
+              source /opt/ros/jazzy/setup.bash && source /ws/install/setup.bash
+              W=$(ros2 pkg prefix harness_description)/share/harness_description
+              ros2 run harness_runner run_scenario \
+                --world $W/worlds/empty_room.sdf --map $W/maps/empty_room.yaml \
+                --x 3.0 --y 2.0 --scenario-id ci_probe \
+                --optimal-path 3.606 --out /ws/results/ci_probe.json'
+
+      - name: Verdict
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import json, sys
+          try:
+              d = json.load(open('results/ci_probe.json'))
+          except OSError:
+              sys.exit('no result file -- the run did not complete; see the step log')
+          sim, wall = d.get('sim_duration'), d.get('wall_duration')
+          rtf = sim / wall if sim and wall else None
+          print(f"outcome={d['outcome']} sim={sim} wall={wall} rtf={rtf} "
+                f"recoveries={d['recoveries']} eff={d['path_efficiency']}")
+          print("Mac reference: clean mode 10.3-11.1 s, rtf ~1.000")
+          if rtf is not None and rtf < 0.7:
+              sys.exit(f"RTF {rtf:.2f} is below the 0.7 exclusion threshold fixed "
+                       f"in CLAUDE.md -- runs from this runner would be discarded "
+                       f"by Phase 9 before analysis. Do not build the sharded "
+                       f"pipeline on this runner class.")
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-probe
+          path: |
+            results/ci_probe.json
+            /tmp/ci_probe.log
+          if-no-files-found: warn
