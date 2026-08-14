@@ -92,6 +92,13 @@ FIELDNAMES = [
     "robot_version", "lidar_hz", "beam_count", "inflation_radius",
     "robot_radius_param", "planner_plugin", "controller_plugin",
     "map_resolution", "goal_tolerance_xy", "goal_tolerance_yaw",
+    # The measurement window, not the system under test -- but it decides
+    # outcomes just as hard. At --goal-timeout 90 every run over ~6 m of
+    # optimal path timed out, several having driven >94% of the route, because
+    # degraded-mode speed is 0.12 m/s. It is a CLI argument so config_hash
+    # cannot see it: two batches at different timeouts would merge silently
+    # and their failure rates are not comparable.
+    "goal_timeout", "startup_timeout",
     "config_hash", "git_sha",
     "started_at", "domain_id", "batch_attempt",
     "leaked_procs", "leaked_detail", "error_detail",
@@ -110,7 +117,7 @@ BATCH_OWNED = frozenset({
     "robot_version", "lidar_hz", "beam_count", "inflation_radius",
     "robot_radius_param", "planner_plugin", "controller_plugin",
     "map_resolution", "goal_tolerance_xy", "goal_tolerance_yaw",
-    "config_hash", "git_sha",
+    "goal_timeout", "startup_timeout", "config_hash", "git_sha",
     "started_at", "domain_id", "batch_attempt",
     "leaked_procs", "leaked_detail",
 })
@@ -634,6 +641,8 @@ def run_one(entry, repeat, domain_id, args, cov, attempt=1):
         "goal_x": entry.get("goal_x"), "goal_y": entry.get("goal_y"),
         "optimal_path": entry.get("optimal_path"),
         "domain_id": domain_id, "batch_attempt": attempt,
+        "goal_timeout": args.goal_timeout,
+        "startup_timeout": args.startup_timeout,
         "started_at": datetime.datetime.now().isoformat(timespec="seconds"),
     })
 
