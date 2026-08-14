@@ -1,0 +1,12 @@
+[
+  {
+    "scenario_id": "control",
+    "seed": -1,
+    "gap_width": null,
+    "world": "/ws/install/harness_description/share/harness_description/worlds/empty_room.sdf",
+    "map": "/ws/install/harness_description/share/harness_description/maps/empty_room.yaml",
+    "goal_x": 3.0,
+    "goal_y": 2.0,
+    "optimal_path": 3.606
+  }
+]

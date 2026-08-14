@@ -85,8 +85,49 @@ def test_classification():
            "path_length": 1.993}
     assert classify_failure("TIMEOUT", s10, planned)[0] == "plan_not_executed"
 
-    # Drove the full path and still failed: rule 11 has no name for this yet,
-    # and inventing one by widening another class would be worse than saying so.
+    # control_3: the controller aborted follow_path 16 times and the BT fired
+    # 4 recoveries in response. Named by the cause, not the symptom -- and the
+    # planner aborts in s00000 must NOT be counted as controller aborts.
+    ctrl = _log(PLANNED + "[controller_server]: [follow_path] [ActionServer] "
+                          "Aborting handle.\n" * 16)
+    c3 = dict(base, recoveries=4, amcl_final_error=1.9,
+              amcl_final_yaw_error=2.482, goal_tolerance_xy=0.25,
+              goal_tolerance_yaw=0.25)
+    cls, ev = classify_failure("FAILED", c3, ctrl)
+    assert cls == "plan_not_executed", cls
+    assert "16 controller aborts" in ev and "0 planner aborts" in ev, ev
+    # s00000's planner aborts are counted on the other side of the pipeline.
+    assert "20 planner aborts" in classify_failure("FAILED", s0, failing)[1]
+    os.unlink(ctrl)
+
+    # Drove the route, then failed the goal check on POSITION.
+    tol = {"goal_tolerance_xy": 0.25, "goal_tolerance_yaw": 0.25}
+    missed = dict(base, amcl_final_error=0.31, amcl_final_yaw_error=0.1, **tol)
+    assert classify_failure("FAILED", missed, planned)[0] == "goal_tolerance_miss"
+
+    # Ended 4 m from the goal: never arrived, so not a "tolerance miss".
+    far = dict(base, amcl_final_error=4.23, amcl_final_yaw_error=2.834, **tol)
+    assert classify_failure("FAILED", far, planned)[0] == "unclassified"
+
+    # ...and on YAW alone, parked exactly on the goal facing the wrong way.
+    # Without goal_tolerance_yaw recorded this was indistinguishable from
+    # a position miss.
+    spun = dict(base, amcl_final_error=0.02, amcl_final_yaw_error=1.4, **tol)
+    assert classify_failure("FAILED", spun, planned)[0] == "goal_tolerance_miss"
+
+    # Inside both tolerances but Nav2 still refused -> genuinely unnamed.
+    inside = dict(base, amcl_final_error=0.11, amcl_final_yaw_error=0.05, **tol)
+    assert classify_failure("FAILED", inside, planned)[0] == "unclassified"
+
+    # A zero error must not read as "field missing" -- 0.0 is falsy.
+    exact = dict(base, amcl_final_error=0.0, amcl_final_yaw_error=0.0, **tol)
+    assert classify_failure("FAILED", exact, planned)[0] == "unclassified"
+
+    # CSV round-trip: the same row arrives as strings, and must classify the same.
+    as_str = {k: str(v) for k, v in missed.items()}
+    assert classify_failure("FAILED", as_str, planned)[0] == "goal_tolerance_miss"
+
+    # No pose data at all (e.g. tf lookup failed) -> never guess.
     assert classify_failure("FAILED", base, planned)[0] == "unclassified"
 
     for p in (planned, silent, failing):

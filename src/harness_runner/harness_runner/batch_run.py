@@ -77,7 +77,13 @@ FIELDNAMES = [
     "optimal_path", "planning_efficiency",
     "min_lidar_range", "min_clearance", "clearance_saturated",
     "max_speed", "recoveries",
-    "final_error", "true_final_error",
+    # Three frames, deliberately. `final_error` is /odom (drifts),
+    # `true_final_error` is ground truth (the simulator's secret), and
+    # `amcl_final_error` is the map-frame estimate SimpleGoalChecker actually
+    # judges. Only the third explains a goal-checker verdict; recording the
+    # first two alone is what left every near-miss `unclassified`.
+    "final_error", "true_final_error", "true_final_yaw_error",
+    "amcl_final_error", "amcl_final_yaw_error", "localisation_error",
     "odom_samples", "scan_samples",
     # Covariates. Constant within a batch by construction, but stored per row
     # so a merged CSV is still analysable and a merge of two configs is still
@@ -85,7 +91,8 @@ FIELDNAMES = [
     # defend" -- and retrofitting these after a 300-run batch means re-running it.
     "robot_version", "lidar_hz", "beam_count", "inflation_radius",
     "robot_radius_param", "planner_plugin", "controller_plugin",
-    "map_resolution", "config_hash", "git_sha",
+    "map_resolution", "goal_tolerance_xy", "goal_tolerance_yaw",
+    "config_hash", "git_sha",
     "started_at", "domain_id", "batch_attempt",
     "leaked_procs", "leaked_detail", "error_detail",
 ]
@@ -102,7 +109,8 @@ BATCH_OWNED = frozenset({
     "failure_class", "failure_evidence", "realtime_factor",
     "robot_version", "lidar_hz", "beam_count", "inflation_radius",
     "robot_radius_param", "planner_plugin", "controller_plugin",
-    "map_resolution", "config_hash", "git_sha",
+    "map_resolution", "goal_tolerance_xy", "goal_tolerance_yaw",
+    "config_hash", "git_sha",
     "started_at", "domain_id", "batch_attempt",
     "leaked_procs", "leaked_detail",
 })
@@ -230,8 +238,14 @@ def probe_config(params_file, urdf_file):
     # the YAML cannot silently change what gets recorded.
     cs = _dig(P, "controller_server", "ros__parameters")
     ps = _dig(P, "planner_server", "ros__parameters")
+    gk = cs["goal_checker_plugins"][0]
 
     return {
+        # Both tolerances, because SimpleGoalChecker fails on EITHER. A robot
+        # parked exactly on the goal facing the wrong way is a failure, and
+        # without yaw recorded it is indistinguishable from a position miss.
+        "goal_tolerance_xy": _dig(cs, gk, "xy_goal_tolerance"),
+        "goal_tolerance_yaw": _dig(cs, gk, "yaw_goal_tolerance"),
         "robot_version": "v1",
         "lidar_hz": float(_exactly_one(
             r"<update_rate>([\d.]+)</update_rate>", urdf,
@@ -289,6 +303,22 @@ def _config_hash(params_file, urdf_file):
 # hypothesis it is supposed to test.
 EXECUTED_FRACTION = 0.5
 STUCK_RECOVERY_COUNT = 3
+# Controller aborts are normal in ones and twos -- an empty-room SUCCESS run
+# logged 8. Sustained aborting is the failure. Set above the highest count
+# observed on a successful run, before any batch used it.
+CONTROLLER_ABORT_COUNT = 10
+# Beyond this multiple of xy_goal_tolerance the robot did not "just miss", it
+# never arrived, and calling it a tolerance miss would be flattering.
+NEAR_MISS_FACTOR = 3.0
+
+
+def _num(row, key):
+    """Float or None. Coerces because the same row is a dict of floats
+    in-process and a dict of strings when read back from the CSV."""
+    try:
+        return float(row.get(key))
+    except (TypeError, ValueError):
+        return None
 
 
 def classify_failure(outcome, row, log_path):
@@ -325,12 +355,25 @@ def classify_failure(outcome, row, log_path):
     low = log.lower()
     plans = log.count("Passing new path")
     plan_fails = low.count("failed to create")     # NavFn could not plan
-    aborts = low.count("aborting handle")          # planner action aborted
-    recoveries = row.get("recoveries") or 0
-    travelled = row.get("true_path_length")
-    optimal = row.get("optimal_path")
-    evidence = (f"{plans} paths, {plan_fails} plan failures, {aborts} aborts, "
-                f"{recoveries} recoveries, moved {travelled} m of {optimal} m")
+    # "Aborting handle" is emitted by BOTH action servers and means opposite
+    # things: compute_path_to_pose = the planner gave up, follow_path = the
+    # controller could not execute a path it was handed. Counting them
+    # together (as this did) merges the two ends of the pipeline into one
+    # meaningless number.
+    plan_aborts = sum(1 for l in low.splitlines()
+                      if "compute_path_to_pose" in l and "aborting handle" in l)
+    ctrl_aborts = sum(1 for l in low.splitlines()
+                      if "follow_path" in l and "aborting handle" in l)
+    recoveries = _num(row, "recoveries") or 0
+    travelled = _num(row, "true_path_length")
+    optimal = _num(row, "optimal_path")
+    xy_err, yaw_err = _num(row, "amcl_final_error"), _num(row, "amcl_final_yaw_error")
+    tol_xy, tol_yaw = _num(row, "goal_tolerance_xy"), _num(row, "goal_tolerance_yaw")
+    evidence = (f"{plans} paths, {plan_fails} plan failures, "
+                f"{plan_aborts} planner aborts, {ctrl_aborts} controller aborts, "
+                f"{recoveries} recoveries, moved {travelled} m of {optimal} m, "
+                f"amcl xy {xy_err}/{tol_xy} yaw {yaw_err}/{tol_yaw}, "
+                f"loc_err {row.get('localisation_error')}")
 
     # Ordered most-fundamental first. Every rule below is downstream of the
     # ones above it, so a run that trips several gets named by its cause
@@ -347,11 +390,26 @@ def classify_failure(outcome, row, log_path):
         # one level down. Verified discriminator: 18 plan failures in the one
         # FAILED run, 0 in both SUCCESS runs.
         return "no_plan", evidence
+    if ctrl_aborts >= CONTROLLER_ABORT_COUNT:
+        # The controller was handed paths and repeatedly could not execute
+        # them. Outranks recoveries for the same reason no_plan does: the
+        # recoveries are the BT reacting to these aborts, not the cause.
+        return "plan_not_executed", evidence
     if recoveries >= STUCK_RECOVERY_COUNT:
         return "stuck_recovering", evidence
-    if travelled is not None and optimal:
-        if travelled < EXECUTED_FRACTION * optimal:
-            return "plan_not_executed", evidence
+    if travelled is not None and optimal and travelled < EXECUTED_FRACTION * optimal:
+        return "plan_not_executed", evidence
+    # Drove the route, then failed the goal check. Not a guess: this recomputes
+    # the same two quantities SimpleGoalChecker compares, from the same
+    # map-frame pose, so an over-tolerance value here IS the reason Nav2
+    # refused. Guarded by proximity -- a robot that ended up 4 m away did not
+    # "miss a tolerance", it never arrived, and without this guard any failure
+    # with an unlucky final heading gets mislabelled.
+    if None not in (xy_err, yaw_err, tol_xy, tol_yaw):
+        if xy_err <= tol_xy and yaw_err > tol_yaw:
+            return "goal_tolerance_miss", evidence       # arrived, wrong heading
+        if tol_xy < xy_err <= NEAR_MISS_FACTOR * tol_xy:
+            return "goal_tolerance_miss", evidence       # stopped just outside
     # Reaching here is a signal, not a bug: the run failed in a way rule 11
     # does not yet name. If a batch produces many, add a class -- do not widen
     # an existing one to absorb them.

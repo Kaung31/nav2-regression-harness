@@ -48,6 +48,16 @@ def yaw_to_quat(yaw):
     return (0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0))
 
 
+def quat_to_yaw(q):
+    return math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                      1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+
+def angle_error(a, b):
+    """Smallest absolute angle between two headings, wrap-safe."""
+    return abs(math.atan2(math.sin(a - b), math.cos(a - b)))
+
+
 class ScenarioRun(Node):
     RECOVERY_NODES = {"Spin", "BackUp", "Wait", "DriveOnHeading",
                       "ClearGlobalCostmap-Context", "ClearLocalCostmap-Context"}
@@ -66,6 +76,7 @@ class ScenarioRun(Node):
         self.true_path_length = 0.0
         self.true_prev_xy = None
         self.true_final_xy = None
+        self.true_final_yaw = None
         self.max_speed = 0.0
         self.recoveries = 0
         self.odom_samples = 0
@@ -142,11 +153,29 @@ class ScenarioRun(Node):
         x = msg.pose.pose.position.x
         y = msg.pose.pose.position.y
         self.true_final_xy = (x, y)
+        self.true_final_yaw = quat_to_yaw(msg.pose.pose.orientation)
         if self.true_prev_xy is not None:
             step = math.hypot(x - self.true_prev_xy[0], y - self.true_prev_xy[1])
             if step < 1.0:
                 self.true_path_length += step
         self.true_prev_xy = (x, y)
+
+    def map_pose(self):
+        """(x, y, yaw) in the map frame, or None.
+
+        This is the AMCL-corrected estimate that `SimpleGoalChecker` actually
+        evaluates. `/odom` drifts and `/ground_truth` is the simulator's
+        secret, so neither explains a goal-checker verdict: recording those
+        two alone left every near-miss failure `unclassified`, because the
+        number Nav2 judged on was not being measured.
+        """
+        try:
+            t = self.tf_buffer.lookup_transform(
+                "map", "base_footprint", rclpy.time.Time())
+        except Exception:
+            return None
+        tr = t.transform.translation
+        return tr.x, tr.y, quat_to_yaw(t.transform.rotation)
 
     def wait_for_active(self, timeout):
         """bt_navigator must be ACTIVE, not merely present."""
@@ -299,6 +328,8 @@ def run_scenario(cfg):
         "max_speed": None, "recoveries": None, "final_error": None,
         "odom_samples": 0, "scan_samples": 0, "wall_time": None,
         "true_path_length": None, "true_final_error": None, "slip_ratio": None,
+        "true_final_yaw_error": None, "amcl_final_error": None,
+        "amcl_final_yaw_error": None, "localisation_error": None,
     }
     wall_start = time.time()
     domain = cfg.get("domain_id", 42)
@@ -374,6 +405,26 @@ def run_scenario(cfg):
                 result["true_final_error"] = round(
                     math.hypot(cfg["goal_x"] - node.true_final_xy[0],
                                cfg["goal_y"] - node.true_final_xy[1]), 3)
+            if node.true_final_yaw is not None:
+                result["true_final_yaw_error"] = round(
+                    angle_error(node.true_final_yaw,
+                                cfg.get("goal_yaw", 0.0)), 3)
+
+            mp = node.map_pose()
+            if mp is not None:
+                mx, my, myaw = mp
+                result["amcl_final_error"] = round(
+                    math.hypot(cfg["goal_x"] - mx, cfg["goal_y"] - my), 3)
+                result["amcl_final_yaw_error"] = round(
+                    angle_error(myaw, cfg.get("goal_yaw", 0.0)), 3)
+                if node.true_final_xy:
+                    # How far the robot's belief is from where it actually is.
+                    # Rule 1 applied to localisation: a large value here means
+                    # any goal-checker verdict is about AMCL, not about
+                    # navigation.
+                    result["localisation_error"] = round(
+                        math.hypot(mx - node.true_final_xy[0],
+                                   my - node.true_final_xy[1]), 3)
     except Exception as exc:
         result["outcome"] = f"HARNESS_ERROR:{type(exc).__name__}"
         result["error_detail"] = str(exc)[:200]
