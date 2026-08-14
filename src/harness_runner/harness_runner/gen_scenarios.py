@@ -7,31 +7,14 @@ import os
 from harness_runner import scenario_gen as sg
 
 
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--count", type=int, default=50)
-    p.add_argument("--start-seed", type=int, default=0)
-    p.add_argument("--out", default="/ws/scenarios")
-    p.add_argument("--gap-width", type=float, default=None,
-                   help="fix the gap width instead of randomising")
-    a = p.parse_args()
-
-    os.makedirs(a.out, exist_ok=True)
-    index, seed, skipped = [], a.start_seed, 0
-
-    while len(index) < a.count:
-        L = sg.generate(seed, gap_width=a.gap_width)
-        seed += 1
-        if L is None:
-            skipped += 1
-            continue
-        sid = f"s{L.seed:05d}"
-        world = os.path.join(a.out, f"{sid}.sdf")
-        yaml_p = os.path.join(a.out, f"{sid}.yaml")
-        sg.write_world(L, world)
-        sg.write_map(L, yaml_p)
-        straight = round((L.goal[0] ** 2 + L.goal[1] ** 2) ** 0.5, 3)
-        index.append({
+def emit(L, sid, out_dir):
+    """Write world + map from one box list (design rule 7) and index it."""
+    world = os.path.join(out_dir, f"{sid}.sdf")
+    yaml_p = os.path.join(out_dir, f"{sid}.yaml")
+    sg.write_world(L, world)
+    sg.write_map(L, yaml_p)
+    straight = round((L.goal[0] ** 2 + L.goal[1] ** 2) ** 0.5, 3)
+    return {
             "scenario_id": sid,
             "seed": L.seed,
             "world": world,
@@ -50,13 +33,70 @@ def main():
             # costs three lines; discovering they are needed after a 300-run
             # batch means regenerating the worlds and re-running the batch.
             "boxes": [[b.cx, b.cy, b.sx, b.sy, b.sz] for b in L.boxes],
-        })
+    }
 
-    idx_path = os.path.join(a.out, "index.json")
+
+def frange(lo, hi, step):
+    """Inclusive of hi, rounded -- 0.05 steps must not drift into 1.4999999."""
+    n = int(round((hi - lo) / step))
+    return [round(lo + i * step, 4) for i in range(n + 1)]
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--mode", choices=["random", "doorway"], default="random",
+                   help="random = seeded rooms, the DISCOVERY mechanism. "
+                        "doorway = canonical single aperture, the MEASUREMENT "
+                        "instrument. They do different jobs; keep both.")
+    p.add_argument("--count", type=int, default=50, help="random mode only")
+    p.add_argument("--start-seed", type=int, default=0)
+    p.add_argument("--out", default="/ws/scenarios")
+    p.add_argument("--gap-width", type=float, default=None,
+                   help="random mode: fix the gap width instead of randomising")
+    p.add_argument("--width-min", type=float, default=0.5)
+    p.add_argument("--width-max", type=float, default=1.5)
+    p.add_argument("--width-step", type=float, default=0.05)
+    p.add_argument("--index-name", default=None,
+                   help="defaults to index.json (random) / doorway_index.json")
+    a = p.parse_args()
+
+    os.makedirs(a.out, exist_ok=True)
+    index, skipped = [], 0
+
+    if a.mode == "doorway":
+        for w in frange(a.width_min, a.width_max, a.width_step):
+            L = sg.generate_doorway(w)
+            if L is None:
+                # Below 2 x ROBOT_RADIUS the footprint does not fit. Ground
+                # truth refusing is a result, not a generator failure -- but
+                # there is nothing to run, so it is not indexed.
+                skipped += 1
+                print(f"  skip w={w:.2f}: footprint does not fit (ground truth)")
+                continue
+            index.append(emit(L, f"d{int(round(w * 100)):03d}", a.out))
+        default_name = "doorway_index.json"
+        # The whole point of the instrument: one number, unchanged throughout.
+        lengths = {e["optimal_path"] for e in index}
+        print(f"optimal_path across all widths: {sorted(lengths)}")
+        if len(lengths) > 1:
+            print("WARNING: path length is NOT constant across widths, so gap "
+                  "width is confounded with it -- exactly the flaw the random "
+                  "rooms have. Do not sweep until this is one value.")
+    else:
+        seed = a.start_seed
+        while len(index) < a.count:
+            L = sg.generate(seed, gap_width=a.gap_width)
+            seed += 1
+            if L is None:
+                skipped += 1
+                continue
+            index.append(emit(L, f"s{L.seed:05d}", a.out))
+        default_name = "index.json"
+
+    idx_path = os.path.join(a.out, a.index_name or default_name)
     with open(idx_path, "w") as f:
         json.dump(index, f, indent=2)
-    print(f"wrote {len(index)} scenarios to {a.out} "
-          f"({skipped} seeds skipped as unreachable)")
+    print(f"wrote {len(index)} scenarios to {a.out} ({skipped} skipped)")
     print(f"index: {idx_path}")
 
 

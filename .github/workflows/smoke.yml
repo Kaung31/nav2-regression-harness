@@ -1,0 +1,87 @@
+# Phase 6, stage 3: the green badge. Runs on every push.
+#
+# This asserts on HARNESS health, never on navigation outcomes. Design rule 4:
+# SUCCESS/FAILED/TIMEOUT/STUCK/REJECTED are data, HARNESS_ERROR/SETUP_FAILED
+# are bugs. A robot that fails to reach its goal must not turn the badge red --
+# the empty room alone fails 15% of the time, so an outcome-asserting smoke
+# suite would be red at random and everyone would learn to ignore it.
+#
+# The heavy sweeps stay on workflow_dispatch (baseline.yml, and Phase 7's
+# sweeps later). This is the fast check that every commit gets.
+name: smoke
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          tags: nav2-harness:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build, unit checks, 3 scenarios
+        run: |
+          docker run --rm --shm-size=2g -v ${{ github.workspace }}:/ws nav2-harness:ci \
+            bash -c 'set -e
+              git config --global --add safe.directory /ws
+              source /opt/ros/jazzy/setup.bash
+              colcon build
+              source /ws/install/setup.bash
+              python3 /ws/src/harness_runner/test/test_phase5.py
+              ros2 run harness_runner batch_run --dry-run
+              ros2 run harness_runner batch_run --limit 3 --goal-timeout 240 \
+                --out /ws/results/smoke_ci.csv --log-dir /ws/results/logs/smoke_ci'
+
+      - name: Assert harness health
+        run: |
+          python3 - <<'EOF'
+          import csv, sys
+          rows = list(csv.DictReader(open('results/smoke_ci.csv')))
+          bad = []
+          if len(rows) != 3:
+              bad.append(f"expected 3 rows, got {len(rows)}")
+          if {r['leaked_procs'] for r in rows} != {'0'}:
+              bad.append(f"leaked processes: {[r['leaked_procs'] for r in rows]}")
+          errs = [r['outcome'] for r in rows if r['outcome'].startswith(('HARNESS_ERROR','SETUP_FAILED','BATCH_'))]
+          if errs:
+              bad.append(f"harness-side outcomes: {errs}")
+          if len({r['config_hash'] for r in rows}) != 1:
+              bad.append(f"config_hash varies within one batch: {[r['config_hash'] for r in rows]}")
+          # Covariates must be present, or the row cannot be conditioned on.
+          for col in ('inflation_radius','lidar_hz','beam_count','planner_plugin',
+                      'controller_plugin','map_resolution','goal_tolerance_xy',
+                      'goal_timeout','realtime_factor','git_sha'):
+              missing = [r['scenario_id'] for r in rows if not r[col]]
+              if missing:
+                  bad.append(f"{col} empty on {missing}")
+          # Rule 11: every non-SUCCESS gets a class.
+          unclassed = [r['scenario_id'] for r in rows
+                       if r['outcome'] != 'SUCCESS' and not r['failure_class']]
+          if unclassed:
+              bad.append(f"non-SUCCESS rows with no failure_class: {unclassed}")
+
+          for r in rows:
+              print(f"  {r['scenario_id']} {r['outcome']:8} rtf={r['realtime_factor']} "
+                    f"class={r['failure_class'] or '-'}")
+          if bad:
+              sys.exit("HARNESS FAULTS:\n  " + "\n  ".join(bad))
+          print("\nharness healthy: outcomes above are data, not assertions")
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-results
+          path: results/smoke_ci.csv
+          if-no-files-found: warn

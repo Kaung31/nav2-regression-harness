@@ -186,6 +186,56 @@ def generate(seed, n_walls=None, gap_width=None, n_obstacles=None,
                   n_obstacles=len(obstacles), optimal_path=round(opt, 3))
 
 
+# --------------------------------------------------------------------------
+# Phase 6.5: the canonical doorway -- the measurement instrument
+# --------------------------------------------------------------------------
+# The random rooms are the discovery mechanism and cannot produce a threshold:
+# batch_r3 measured gap width as FLAT across always-pass / flips / always-fail
+# (means 1.24 / 1.34 / 1.17), while path length separated them cleanly. So the
+# controlled experiment pins path length above all else.
+#
+# Spawn is (0, 0) because harness.launch.py hardcodes it. Building the geometry
+# around the fixed spawn -- rather than moving the robot -- is what lets the
+# straight line from start, through a centred aperture, to the goal stay
+# EXACTLY the same length at every width.
+DOORWAY_WALL_Y = 2.0
+DOORWAY_GOAL_Y = 4.0
+
+
+def generate_doorway(gap_width, wall_y=DOORWAY_WALL_Y, goal_y=DOORWAY_GOAL_Y):
+    """One wall, one centred aperture, gap width the only variable.
+
+    Held constant by construction: room size, wall thickness, spawn, goal,
+    approach angle (head-on -- the aperture sits on the straight line between
+    start and goal), and path length. The wall spans the full room, so the gap
+    is the only route: a failure means the stack could not use the aperture,
+    not that it preferred a different way round.
+
+    Returns None when the footprint physically cannot fit, i.e. below
+    2 x ROBOT_RADIUS. That is ground truth refusing, not an error.
+    """
+    inner = HALF - WALL_T / 2
+    half_gap = gap_width / 2.0
+    seg = inner - half_gap
+    if seg <= 0:
+        raise ValueError(
+            f"gap_width {gap_width} leaves no wall either side of the aperture")
+
+    boxes = _perimeter()
+    for sign in (-1, 1):
+        boxes.append(Box(sign * (inner + half_gap) / 2.0, wall_y, seg, WALL_T))
+
+    goal = (0.0, goal_y)
+    blocked = to_grid(boxes, ROBOT_RADIUS) | _outside_mask()
+    opt = bfs_path_length(blocked, (0.0, 0.0), goal)
+    if opt is None:
+        return None
+
+    return Layout(seed=int(round(gap_width * 100)), boxes=boxes,
+                  start=(0.0, 0.0), goal=goal, gap_width=gap_width,
+                  n_walls=1, n_obstacles=0, optimal_path=round(opt, 3))
+
+
 def write_world(layout, path):
     parts = ['<?xml version="1.0"?>', '<sdf version="1.10">',
              f'  <world name="scenario_{layout.seed}">',
