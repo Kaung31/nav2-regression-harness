@@ -121,14 +121,25 @@ jobs:
               print(f"{w:5.2f} {n:3d} {ok:5d} {rate:6.0%}  [{lo:5.1%},{hi:5.1%}]  {bar:<20} "
                     f"{dict(cls) if cls else ''}")
           print()
-          if band:
-              print(f"TRANSITION BAND: {min(band):.2f} - {max(band):.2f} m "
-                    f"({len(band)} widths neither 0% nor 100%)")
-              print("Concentrate repeats here for the powered sweep; ~5 per width outside it.")
+          # A width that is neither 0% nor 100% is NOT evidence of a transition.
+          # At the pooled failure rate, most widths show a failure by chance at
+          # small n, and reporting that as a "band" is reading noise as signal.
+          # Compare against what chance predicts before claiming anything.
+          k = sum(1 for r in rows if r['outcome'] != 'SUCCESS')
+          pf = k/len(rows)
+          expected = 1 - (1-pf)**(len(rows)//len(by))
+          print(f"pooled failure rate {pf:.1%} across all widths "
+                f"(empty-room baseline: 15.0% [5.2%, 36.0%])")
+          print(f"widths showing >=1 failure: {len(band)}/{len(by)} = {len(band)/len(by):.0%}"
+                f"   chance predicts {expected:.0%}")
+          if band and len(band)/len(by) > expected * 1.5:
+              print(f"Mixed outcomes exceed chance -- candidate band "
+                    f"{min(band):.2f}-{max(band):.2f} m. Concentrate repeats there.")
           else:
-              print("No mixed-outcome widths: either the step is too coarse, or the "
-                    "transition sits outside 0.50-1.50 m. Widen or refine before "
-                    "spending runs on a powered sweep.")
+              print("Mixed outcomes are consistent with chance: NO gap-width effect "
+                    "detected at this n. Do not fit a threshold to this. Either the "
+                    "effect is smaller than the baseline noise floor, or there is "
+                    "none. A powered sweep must beat the baseline, not zero.")
           print(f"\n2 x inflation_radius = {2*float(rows[0]['inflation_radius']):.2f} m "
                 f"-- the number Phase 7a exists to confirm or refute")
           rtf = [float(r['realtime_factor']) for r in rows if r['realtime_factor']]
