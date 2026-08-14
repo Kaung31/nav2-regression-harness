@@ -38,6 +38,11 @@ jobs:
         run: |
           docker run --rm --shm-size=2g -v ${{ github.workspace }}:/ws nav2-harness:ci \
             bash -c 'set -e
+              # The checkout is owned by the runner user, the container is
+              # root, so git refuses the repo and git_sha lands as "no-git".
+              # Provenance matters more here than locally: a CI row nobody can
+              # map to a commit is a row nobody can reproduce.
+              git config --global --add safe.directory /ws
               source /opt/ros/jazzy/setup.bash
               colcon build
               source /ws/install/setup.bash
