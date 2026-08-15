@@ -600,6 +600,8 @@ def build_cmd(entry, sid, out_json, domain_id, args):
            "--out", out_json]
     if entry.get("optimal_path") is not None:
         cmd += ["--optimal-path", str(entry["optimal_path"])]
+    if args.params_file:
+        cmd += ["--params-file", args.params_file]
     return cmd
 
 
@@ -789,6 +791,12 @@ def main():
                         "contiguous blocks, so scenario difficulty spreads "
                         "evenly -- contiguous chunks would give one worker "
                         "every hard scenario and skew wall-clock badly.")
+    p.add_argument("--params-file", default=None,
+                   help="override nav2_params.yaml for the whole batch. The "
+                        "covariate probe and config_hash read THIS file, so a "
+                        "sweep cell is fingerprinted by the config it actually "
+                        "ran -- without that every cell would share one hash "
+                        "and the sweep would be unanalysable.")
     p.add_argument("--dry-run", action="store_true")
     a = p.parse_args()
 
@@ -801,7 +809,8 @@ def main():
     try:
         from ament_index_python.packages import get_package_share_directory
         share = get_package_share_directory("harness_description")
-        cov = probe_config(os.path.join(share, "config", "nav2_params.yaml"),
+        params = a.params_file or os.path.join(share, "config", "nav2_params.yaml")
+        cov = probe_config(params,
                            os.path.join(share, "urdf", "robot.urdf.xacro"))
     except ConfigError as exc:
         print(f"\ncannot read run covariates: {exc}\n", file=sys.stderr)

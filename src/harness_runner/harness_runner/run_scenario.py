@@ -260,11 +260,12 @@ class ScenarioRun(Node):
 class StackProcess:
     """Owns the launch subprocess and guarantees scoped teardown."""
 
-    def __init__(self, world, map_yaml, domain_id, log_path):
+    def __init__(self, world, map_yaml, domain_id, log_path, params_file=None):
         self.world = world
         self.map_yaml = map_yaml
         self.domain_id = domain_id
         self.log_path = log_path
+        self.params_file = params_file
         self.proc = None
         self.log_fh = None
 
@@ -277,6 +278,11 @@ class StackProcess:
         cmd = ["ros2", "launch", "harness_description", "harness.launch.py",
                f"world:={self.world}", f"map:={self.map_yaml}",
                "use_foxglove:=false"]
+        # Phase 7a: the swept parameter is the independent variable, so it
+        # has to reach Nav2. Without this the launch silently uses the
+        # installed default and every "sweep" cell runs identical config.
+        if self.params_file:
+            cmd.append(f"params_file:={self.params_file}")
         self.proc = subprocess.Popen(
             cmd, stdout=self.log_fh, stderr=subprocess.STDOUT,
             env=env, start_new_session=True)
@@ -337,7 +343,8 @@ def run_scenario(cfg):
 
     node = None
     try:
-        with StackProcess(cfg["world"], cfg["map"], domain, log_path):
+        with StackProcess(cfg["world"], cfg["map"], domain, log_path,
+                          cfg.get("params_file")):
             os.environ["ROS_DOMAIN_ID"] = str(domain)
             rclpy.init()
             node = ScenarioRun()
@@ -452,6 +459,10 @@ def main():
     p.add_argument("--goal-timeout", type=float, default=180.0)
     p.add_argument("--startup-timeout", type=float, default=180.0)
     p.add_argument("--optimal-path", type=float, default=None)
+    p.add_argument("--params-file", default=None,
+                   help="override nav2_params.yaml. Phase 7a sweeps only -- "
+                        "the swept parameter IS the independent variable, "
+                        "which is the one case design rule 10 permits.")
     p.add_argument("--out", default=None)
     a = p.parse_args()
 
@@ -461,6 +472,7 @@ def main():
            "domain_id": a.domain_id, "goal_timeout": a.goal_timeout,
            "startup_timeout": a.startup_timeout,
            "optimal_path": a.optimal_path,
+           "params_file": a.params_file,
            "log_path": f"/tmp/{sid}.log"}
     res = run_scenario(cfg)
     print(json.dumps(res, indent=2))

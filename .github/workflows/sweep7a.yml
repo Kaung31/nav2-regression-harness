@@ -1,0 +1,181 @@
+# Phase 7a: does the traversable limit track a parameter, and which one?
+#
+# The doorway sweep found NO gap-width effect at stock config: 0.50 m passes
+# 3/3, and 15.9% overall is indistinguishable from the 15% empty-room baseline.
+# That is consistent with the documented mechanism -- inflation controls cost
+# DECAY, while the lethal boundary comes from robot_radius. So this sweep tests
+# a stated prediction rather than fishing for a threshold:
+#
+#   robot_radius    SHOULD move the limit, to ~2 x robot_radius
+#   inflation_radius SHOULD NOT, because it changes no cell to lethal
+#
+# With widths 0.50-1.50 the robot_radius values below put three predicted
+# thresholds inside the swept range:
+#   0.22 -> 0.44 (no failures expected)   0.30 -> 0.60
+#   0.40 -> 0.80                          0.50 -> 1.00
+#
+# BFS ground truth keeps using the PHYSICAL 0.22 m radius, so optimal_path
+# stays 4.0 m throughout and only Nav2's belief changes. The gap between "the
+# robot fits" and "the stack will use it" is design rule 8, made measurable.
+name: sweep 7a
+
+on:
+  workflow_dispatch:
+    inputs:
+      param:
+        description: "parameter to sweep"
+        type: choice
+        options: [robot_radius, inflation_radius]
+        default: robot_radius
+      values:
+        description: "comma-separated values"
+        default: "0.22,0.30,0.40,0.50"
+      repeats:
+        description: "runs per gap width per value"
+        default: "3"
+      shards:
+        description: "parallel workers per value"
+        default: "4"
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      values: ${{ steps.m.outputs.values }}
+      shards: ${{ steps.m.outputs.shards }}
+    steps:
+      - id: m
+        run: |
+          echo "values=$(echo '${{ github.event.inputs.values }}' | jq -Rc 'split(",")')" >> $GITHUB_OUTPUT
+          echo "shards=$(seq 1 ${{ github.event.inputs.shards }} | jq -Rsc 'split("\n")[:-1]')" >> $GITHUB_OUTPUT
+
+  sweep:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        value: ${{ fromJson(needs.plan.outputs.values) }}
+        shard: ${{ fromJson(needs.plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          tags: nav2-harness:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: ${{ github.event.inputs.param }}=${{ matrix.value }} shard ${{ matrix.shard }}
+        run: |
+          docker run --rm --shm-size=2g -v ${{ github.workspace }}:/ws nav2-harness:ci \
+            bash -c 'set -e
+              git config --global --add safe.directory /ws
+              source /opt/ros/jazzy/setup.bash
+              colcon build
+              source /ws/install/setup.bash
+              ros2 run harness_runner make_params \
+                --set ${{ github.event.inputs.param }}=${{ matrix.value }} \
+                --out /tmp/params_${{ matrix.value }}.yaml
+              ros2 run harness_runner gen_scenarios --mode doorway --out /ws/scenarios
+              ros2 run harness_runner batch_run \
+                --index /ws/scenarios/doorway_index.json \
+                --params-file /tmp/params_${{ matrix.value }}.yaml \
+                --repeats ${{ github.event.inputs.repeats }} \
+                --shard ${{ matrix.shard }}/${{ github.event.inputs.shards }} \
+                --goal-timeout 240 \
+                --out /ws/results/sweep_${{ matrix.value }}_${{ matrix.shard }}.csv \
+                --log-dir /ws/results/logs/s7a_${{ matrix.value }}_${{ matrix.shard }}'
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sweep-${{ matrix.value }}-${{ matrix.shard }}
+          path: results/sweep_${{ matrix.value }}_${{ matrix.shard }}.csv
+          if-no-files-found: error
+
+  merge:
+    needs: sweep
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sweep-*
+          path: shards
+          merge-multiple: true
+
+      - name: Merge per value, then compare
+        run: |
+          set -e
+          # Per value first, with the config_hash guard ACTIVE: every shard of
+          # one cell must have run identical config or the cell is void.
+          for v in $(echo '${{ github.event.inputs.values }}' | tr ',' ' '); do
+            echo "== ${{ github.event.inputs.param }}=$v"
+            python3 src/harness_runner/harness_runner/merge_shards.py \
+              "shards/sweep_${v}_*.csv" --out "results/sweep_${v}.csv"
+          done
+          # Then combine across values. --allow-mixed is correct here and only
+          # here: differing config_hash is the DESIGN, the swept parameter is
+          # a column, and rule 10 permits exactly this.
+          python3 src/harness_runner/harness_runner/merge_shards.py \
+            'results/sweep_*.csv' --out results/sweep7a.csv --allow-mixed
+
+          python3 - <<'EOF'
+          import csv, collections, math
+          PARAM = "${{ github.event.inputs.param }}"
+          # The CSV column for robot_radius is robot_radius_param -- named to
+          # distinguish Nav2's BELIEF about the footprint from the physical
+          # ROBOT_RADIUS that BFS ground truth uses. That distinction is the
+          # entire point of this sweep, so do not collapse the two names.
+          COL = {'robot_radius': 'robot_radius_param'}.get(PARAM, PARAM)
+          rows = list(csv.DictReader(open('results/sweep7a.csv')))
+          cells = collections.defaultdict(list)
+          for r in rows:
+              cells[(r[COL], float(r['gap_width_continuous']))].append(r)
+          vals = sorted({k[0] for k in cells}, key=float)
+          widths = sorted({k[1] for k in cells})
+
+          print(f"success rate, rows = {PARAM}, columns = gap width\n")
+          print("       " + " ".join(f"{w:>4.2f}" for w in widths))
+          for v in vals:
+              line = f"{float(v):5.2f}  "
+              for w in widths:
+                  g = cells.get((v, w), [])
+                  if not g: line += "   . "
+                  else:
+                      ok = sum(1 for r in g if r['outcome'] == 'SUCCESS')
+                      line += f" {ok}/{len(g)}"
+              print(line)
+
+          print(f"\n{'value':>6} {'pooled fail':>12} {'first width passing all':>26} {'predicted 2xr':>14}")
+          for v in vals:
+              g = [r for c, rs in cells.items() if c[0] == v for r in rs]
+              k = sum(1 for r in g if r['outcome'] != 'SUCCESS')
+              first = None
+              for w in widths:
+                  c = cells.get((v, w), [])
+                  if c and all(r['outcome'] == 'SUCCESS' for r in c):
+                      first = w; break
+              pred = 2*float(v) if PARAM == 'robot_radius' else float('nan')
+              print(f"{float(v):6.2f} {k:5d}/{len(g):<6} {str(first):>26} {pred:>14.2f}")
+          print("\nbaseline for comparison: empty room 3/20 = 15.0% [5.2%, 36.0%]")
+          print("doorway at stock config: 10/63 = 15.9% [8.9%, 26.8%], no width effect")
+          if PARAM == 'robot_radius':
+              print("\nPREDICTION: first-passing width tracks 2 x robot_radius.")
+              print("If it does not, the lethal boundary is not what sets the limit.")
+          else:
+              print("\nPREDICTION: no movement -- inflation changes cost, not lethality.")
+              print("If the limit DOES move, cost decay is doing more than documented.")
+          print("\nleaked_procs:", {r['leaked_procs'] for r in rows})
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sweep7a-merged
+          path: results/sweep*.csv
